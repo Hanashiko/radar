@@ -28,7 +28,6 @@ import {
   getPodReadiness,
   getPodRestarts,
   getPodProblems,
-  getWorkloadStatus,
   getWorkloadImages,
   getWorkloadConditions,
   getReplicaSetOwner,
@@ -89,6 +88,15 @@ import {
   getCertificateRequestApproved,
   getClusterIssuerStatus,
   getClusterIssuerType,
+  getIssuerStatus,
+  getIssuerType,
+  getOrderState,
+  getOrderDomains,
+  getOrderIssuer,
+  getChallengeState,
+  getChallengeType,
+  getChallengeDomain,
+  getChallengePresented,
   getGatewayStatus,
   getGatewayClass,
   getGatewayListeners,
@@ -154,15 +162,30 @@ import {
   getArgoAppProjectSources,
   formatAge,
   truncate,
+  getCellFilterValue,
+  parseColumnFilters,
+  serializeColumnFilters,
 } from './resource-utils'
 import { Tooltip } from '../ui/Tooltip'
 import { getResourceIcon } from '../../utils/resource-icons'
 
-// Filter options for different resource kinds
-const POD_PHASES = ['Running', 'Pending', 'Succeeded', 'Failed', 'Unknown'] as const
+// Pod problem filter options (special multi-select, not a single column value)
 const POD_PROBLEMS = ['CrashLoopBackOff', 'ImagePullBackOff', 'OOMKilled', 'Unschedulable', 'Not Ready', 'High Restarts'] as const
-const WORKLOAD_HEALTH = ['Healthy', 'Degraded', 'Unhealthy', 'Scaled to 0'] as const
-const NODE_CONDITIONS = ['DiskPressure', 'MemoryPressure', 'PIDPressure', 'NetworkUnavailable', 'NotReady'] as const
+
+// Columns to skip for auto-detected filters (high cardinality, text-like, or non-filterable)
+const SKIP_FILTER_COLUMNS = new Set([
+  'name', 'namespace', 'age', 'keys', 'size', 'images', 'domains', 'hosts', 'rules',
+  'ports', 'message', 'url', 'ref', 'revision', 'path', 'selector', 'ready', 'restarts',
+  'completions', 'duration', 'schedule', 'lastRun', 'target', 'replicas', 'metrics',
+  'capacity', 'accessModes', 'volume', 'step', 'progress', 'template', 'expires',
+  'issuer', 'domain', 'presented', 'listeners', 'routes', 'addresses', 'hostnames',
+  'parents', 'backends', 'controller', 'description', 'externalIP', 'address',
+  'conditions', 'taints', 'version', 'desired', 'upToDate', 'available', 'owner',
+  'tls', 'endpoints', 'object', 'count', 'lastSeen', 'reason', 'source', 'inventory',
+  'lastUpdated', 'chart', 'provider', 'events', 'project', 'sync', 'health', 'repo',
+  'generators', 'applications', 'destinations', 'sources', 'budget', 'healthy', 'allowed',
+  'secrets', 'subjects', 'role', 'node', 'entrypoint', 'templates',
+])
 
 // Fallback resource types when API resources aren't loaded yet
 const CORE_RESOURCE_TYPES = [
@@ -420,6 +443,30 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'issuerType', label: 'Type', width: 'w-24' },
     { key: 'age', label: 'Age', width: 'w-20' },
   ],
+  issuers: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-48' },
+    { key: 'status', label: 'Ready', width: 'w-24' },
+    { key: 'issuerType', label: 'Type', width: 'w-24' },
+    { key: 'age', label: 'Age', width: 'w-20' },
+  ],
+  orders: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-48' },
+    { key: 'state', label: 'State', width: 'w-24' },
+    { key: 'domains', label: 'Domains', width: 'w-48' },
+    { key: 'issuer', label: 'Issuer', width: 'w-36', hideOnMobile: true },
+    { key: 'age', label: 'Age', width: 'w-20' },
+  ],
+  challenges: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-48' },
+    { key: 'challengeType', label: 'Type', width: 'w-20' },
+    { key: 'state', label: 'State', width: 'w-24' },
+    { key: 'domain', label: 'Domain', width: 'w-48' },
+    { key: 'presented', label: 'Presented', width: 'w-24', hideOnMobile: true },
+    { key: 'age', label: 'Age', width: 'w-20' },
+  ],
   gateways: [
     { key: 'name', label: 'Name' },
     { key: 'namespace', label: 'Namespace', width: 'w-48' },
@@ -666,15 +713,19 @@ function getInitialKindFromURL(): SelectedKindInfo {
 // Get initial filters from URL
 function getInitialFiltersFromURL() {
   const params = new URLSearchParams(window.location.search)
-  return {
+  // Parse generic column filters
+  const columnFilters = parseColumnFilters(params.get('filters'))
+  const result = {
     search: params.get('search') || '',
-    statusFilter: params.get('status') || '',
+    columnFilters,
     problemFilters: params.get('problems')?.split(',').filter(Boolean) || [],
     showInactive: params.get('showInactive') === 'true',
     labelSelector: params.get('labels') || '', // e.g., "app=caretta,version=v1"
     ownerKind: params.get('ownerKind') || '', // e.g., "DaemonSet"
     ownerName: params.get('ownerName') || '', // e.g., "app-caretta"
   }
+  console.debug('[filters] getInitialFiltersFromURL:', { url: window.location.search, columnFilters: result.columnFilters, search: result.search, problemFilters: result.problemFilters })
+  return result
 }
 
 // Sort state type
@@ -692,7 +743,7 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
   const [sortDirection, setSortDirection] = useState<SortDirection>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   // Filter state
-  const [statusFilter, setStatusFilter] = useState<string>(initialFilters.statusFilter)
+  const [columnFilters, setColumnFilters] = useState<Record<string, string>>(initialFilters.columnFilters)
   const [problemFilters, setProblemFilters] = useState<string[]>(initialFilters.problemFilters)
   const [showFilterDropdown, setShowFilterDropdown] = useState(false)
   // ReplicaSet-specific: hide inactive by default
@@ -701,6 +752,8 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
   const [labelSelector, setLabelSelector] = useState<string>(initialFilters.labelSelector)
   const [ownerKind, setOwnerKind] = useState<string>(initialFilters.ownerKind)
   const [ownerName, setOwnerName] = useState<string>(initialFilters.ownerName)
+
+  console.debug('[filters] ResourcesView render:', { kind: selectedKind.name, columnFilters, searchTerm, url: location.search })
 
   // Track if this is the initial mount to avoid re-syncing on first render
   const isInitialMount = useRef(true)
@@ -714,6 +767,8 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
   const lastScrolledResource = useRef<string | null>(null)
   // Ref to search input for keyboard shortcut
   const searchInputRef = useRef<HTMLInputElement>(null)
+  // Ref to filter dropdown for click-outside closing
+  const filterDropdownRef = useRef<HTMLDivElement>(null)
 
   // Keyboard shortcut: / or Cmd/Ctrl+K to focus search
   useEffect(() => {
@@ -729,12 +784,27 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
     return () => document.removeEventListener('keydown', handler)
   }, [])
 
+  // Close filter dropdown on outside click
+  useEffect(() => {
+    if (!showFilterDropdown) return
+    const handler = (e: MouseEvent) => {
+      if (filterDropdownRef.current && !filterDropdownRef.current.contains(e.target as Node)) {
+        setShowFilterDropdown(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showFilterDropdown])
+
   // Sync state from URL when navigation occurs (e.g., deep linking from WorkloadRenderer)
   useEffect(() => {
     if (isInitialMount.current) {
       isInitialMount.current = false
+      console.debug('[filters] URL sync effect: skipping initial mount')
       return
     }
+
+    console.debug('[filters] URL sync effect: location.search changed →', location.search)
 
     // Mark that we're syncing from URL to prevent URL write-back
     isSyncingFromURL.current = true
@@ -745,6 +815,7 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
 
     // Update kind if it changed
     if (newKind.name !== selectedKind.name || newKind.group !== selectedKind.group) {
+      console.debug('[filters] URL sync: kind changed', { from: selectedKind.name, to: newKind.name })
       setSelectedKind(newKind)
     }
 
@@ -759,8 +830,19 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
       setSearchTerm(newFilters.search)
     }
 
+    // Update column filters if changed
+    const newFiltersStr = serializeColumnFilters(newFilters.columnFilters)
+    const currentFiltersStr = serializeColumnFilters(columnFilters)
+    if (newFiltersStr !== currentFiltersStr) {
+      console.debug('[filters] URL sync: columnFilters changed', { from: columnFilters, to: newFilters.columnFilters })
+      setColumnFilters(newFilters.columnFilters)
+    } else {
+      console.debug('[filters] URL sync: columnFilters unchanged', columnFilters)
+    }
+
     // Reset the flag after a tick to allow normal URL updates
     requestAnimationFrame(() => {
+      console.debug('[filters] URL sync: resetting isSyncingFromURL flag')
       isSyncingFromURL.current = false
     })
   }, [location.search]) // Re-run when URL search params change
@@ -769,7 +851,7 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
   const updateURL = useCallback((
     kindInfo: SelectedKindInfo,
     search: string,
-    status: string,
+    colFilters: Record<string, string>,
     problems: string[],
     showInactive: boolean,
     resourceNs?: string,
@@ -790,10 +872,12 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
     } else {
       params.delete('search')
     }
-    if (status) {
-      params.set('status', status)
+    // Write column filters as `filters` param; remove legacy `status` param
+    const filtersStr = serializeColumnFilters(colFilters)
+    if (filtersStr) {
+      params.set('filters', filtersStr)
     } else {
-      params.delete('status')
+      params.delete('filters')
     }
     if (problems.length > 0) {
       params.set('problems', problems.join(','))
@@ -812,6 +896,7 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
     }
 
     const newURL = `${window.location.pathname}?${params.toString()}`
+    console.debug('[filters] updateURL:', newURL)
     window.history.replaceState({}, '', newURL)
   }, [])
 
@@ -819,17 +904,20 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
   useEffect(() => {
     // Skip URL update if we're syncing FROM the URL (e.g., browser back button)
     if (isSyncingFromURL.current) {
+      console.debug('[filters] URL update effect: skipped (syncing from URL)')
       return
     }
     // Skip URL update if selectedResource's kind doesn't match selectedKind (still syncing)
     if (selectedResource) {
       const resourceKindLower = selectedResource.kind.toLowerCase()
       if (selectedKind.name.toLowerCase() !== resourceKindLower) {
+        console.debug('[filters] URL update effect: skipped (kind mismatch)', { selectedKind: selectedKind.name, resourceKind: selectedResource.kind })
         return // Wait for kind sync effect to run first
       }
     }
-    updateURL(selectedKind, searchTerm, statusFilter, problemFilters, showInactiveReplicaSets, selectedResource?.namespace, selectedResource?.name)
-  }, [selectedKind, searchTerm, statusFilter, problemFilters, showInactiveReplicaSets, selectedResource, updateURL])
+    console.debug('[filters] URL update effect: writing state to URL', { kind: selectedKind.name, columnFilters, searchTerm, problemFilters })
+    updateURL(selectedKind, searchTerm, columnFilters, problemFilters, showInactiveReplicaSets, selectedResource?.namespace, selectedResource?.name)
+  }, [selectedKind, searchTerm, columnFilters, problemFilters, showInactiveReplicaSets, selectedResource, updateURL])
 
   // Handle resource click from URL on mount
   useEffect(() => {
@@ -1024,11 +1112,24 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
     return result
   }, [resourcesToCount, resourceQueries])
 
-  // Reset sort and filters when kind changes
+  // Reset sort and filters when kind changes (but not when syncing from URL navigation)
+  // Track previous kind to skip on mount (where the effect fires but kind hasn't actually changed)
+  const prevKindRef = useRef(selectedKind.name)
   useEffect(() => {
+    if (prevKindRef.current === selectedKind.name) {
+      console.debug('[filters] kind-change effect: skipping (kind unchanged on mount)', selectedKind.name)
+      return
+    }
+    console.debug('[filters] kind-change effect: kind changed from', prevKindRef.current, 'to', selectedKind.name, '| isSyncingFromURL =', isSyncingFromURL.current)
+    prevKindRef.current = selectedKind.name
     setSortColumn(null)
     setSortDirection(null)
-    setStatusFilter('')
+    if (!isSyncingFromURL.current) {
+      console.debug('[filters] kind-change effect: clearing columnFilters')
+      setColumnFilters({})
+    } else {
+      console.debug('[filters] kind-change effect: preserving columnFilters (URL sync in progress)')
+    }
     setProblemFilters([])
   }, [selectedKind.name])
 
@@ -1139,15 +1240,6 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
     })
   }, [])
 
-  // Helper to get workload health level
-  const getWorkloadHealthLevel = useCallback((resource: any, kind: string): string => {
-    const status = getWorkloadStatus(resource, kind)
-    if (status.text === 'Scaled to 0') return 'Scaled to 0'
-    if (status.level === 'healthy') return 'Healthy'
-    if (status.level === 'degraded') return 'Degraded'
-    if (status.level === 'unhealthy') return 'Unhealthy'
-    return 'Unknown'
-  }, [])
 
   // Filter resources by search term, status, problems, and sort
   const filteredResources = useMemo(() => {
@@ -1164,28 +1256,17 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
       )
     }
 
-    // Apply status filter
-    if (statusFilter) {
+    // Apply column filters (generic)
+    const activeColFilters = Object.entries(columnFilters).filter(([, v]) => v)
+    if (activeColFilters.length > 0) {
       const kindLower = selectedKind.name.toLowerCase()
-      result = result.filter((r: any) => {
-        if (kindLower === 'pods') {
-          // Pod phase filter
-          return r.status?.phase === statusFilter
-        } else if (['deployments', 'statefulsets', 'daemonsets', 'replicasets'].includes(kindLower)) {
-          // Workload health filter
-          const health = getWorkloadHealthLevel(r, kindLower)
-          return health === statusFilter
-        } else if (kindLower === 'nodes') {
-          // Node condition filter
-          const nodeStatus = getNodeStatus(r)
-          const { problems } = getNodeConditions(r)
-          if (statusFilter === 'NotReady') {
-            return nodeStatus.text.includes('NotReady')
-          }
-          return problems.some(p => p.replace(' ', '') === statusFilter.replace(' ', ''))
-        }
-        return true
-      })
+      const beforeCount = result.length
+      result = result.filter((r: any) =>
+        activeColFilters.every(([col, val]) =>
+          getCellFilterValue(r, col, kindLower) === val
+        )
+      )
+      console.debug('[filters] filteredResources: column filters applied', { filters: Object.fromEntries(activeColFilters), kind: kindLower, before: beforeCount, after: result.length })
     }
 
     // Apply problem filters (pods only)
@@ -1310,7 +1391,7 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
     }
 
     return result
-  }, [resources, searchTerm, statusFilter, problemFilters, showInactiveReplicaSets, labelSelector, ownerKind, ownerName, selectedKind.name, sortColumn, sortDirection, getSortValue, podMatchesProblemFilter, getWorkloadHealthLevel])
+  }, [resources, searchTerm, columnFilters, problemFilters, showInactiveReplicaSets, labelSelector, ownerKind, ownerName, selectedKind.name, sortColumn, sortDirection, getSortValue, podMatchesProblemFilter])
 
   // Scroll to selected row when selection changes (but not on group expand/filteredResources change)
   useEffect(() => {
@@ -1445,22 +1526,49 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
     if (!resources || resources.length === 0) return null
 
     const kindLower = selectedKind.name.toLowerCase()
+    const columns = KNOWN_COLUMNS[kindLower] || DEFAULT_COLUMNS
 
+    // Auto-detect filterable columns
+    const filterableColumns: Array<{
+      key: string
+      label: string
+      values: Array<{ value: string; count: number }>
+    }> = []
+
+    for (const col of columns) {
+      if (SKIP_FILTER_COLUMNS.has(col.key)) continue
+
+      // Count distinct values for this column
+      const valueCounts: Record<string, number> = {}
+      for (const r of resources) {
+        const val = getCellFilterValue(r, col.key, kindLower)
+        if (val) {
+          valueCounts[val] = (valueCounts[val] || 0) + 1
+        }
+      }
+
+      const distinctCount = Object.keys(valueCounts).length
+      // Only include if 2-20 distinct values (too few = useless, too many = not a filter)
+      if (distinctCount >= 2 && distinctCount <= 20) {
+        filterableColumns.push({
+          key: col.key,
+          label: col.label,
+          values: Object.entries(valueCounts)
+            .map(([value, count]) => ({ value, count }))
+            .sort((a, b) => b.count - a.count),
+        })
+      }
+    }
+
+    // Pod-specific: compute problem counts (multi-select, different semantics)
+    let problems: Array<{ value: string; count: number }> | undefined
     if (kindLower === 'pods') {
-      // Pod phase counts
-      const phaseCounts: Record<string, number> = {}
-      POD_PHASES.forEach(p => phaseCounts[p] = 0)
-      // Problem counts
       const problemCounts: Record<string, number> = {}
       POD_PROBLEMS.forEach(p => problemCounts[p] = 0)
 
       for (const pod of resources) {
-        const phase = pod.status?.phase || 'Unknown'
-        if (phaseCounts[phase] !== undefined) phaseCounts[phase]++
-
-        // Count problems
-        const problems = getPodProblems(pod)
-        const msgs = problems.map(p => p.message)
+        const podProblems = getPodProblems(pod)
+        const msgs = podProblems.map(p => p.message)
         const restarts = getPodRestarts(pod)
 
         if (msgs.includes('CrashLoopBackOff')) problemCounts['CrashLoopBackOff']++
@@ -1471,50 +1579,22 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
         if (restarts > 5) problemCounts['High Restarts']++
       }
 
-      return {
-        type: 'pods' as const,
-        phases: POD_PHASES.map(p => ({ value: p, count: phaseCounts[p] })).filter(p => p.count > 0),
-        problems: POD_PROBLEMS.map(p => ({ value: p, count: problemCounts[p] })).filter(p => p.count > 0),
+      const activeProblems = POD_PROBLEMS
+        .map(p => ({ value: p, count: problemCounts[p] }))
+        .filter(p => p.count > 0)
+      if (activeProblems.length > 0) {
+        problems = activeProblems
       }
     }
 
-    if (['deployments', 'statefulsets', 'daemonsets', 'replicasets'].includes(kindLower)) {
-      const healthCounts: Record<string, number> = {}
-      WORKLOAD_HEALTH.forEach(h => healthCounts[h] = 0)
-
-      for (const resource of resources) {
-        const health = getWorkloadHealthLevel(resource, kindLower)
-        if (healthCounts[health] !== undefined) healthCounts[health]++
-      }
-
-      return {
-        type: 'workload' as const,
-        health: WORKLOAD_HEALTH.map(h => ({ value: h, count: healthCounts[h] })).filter(h => h.count > 0),
-      }
+    if (filterableColumns.length === 0 && !problems) {
+      console.debug('[filters] filterOptions: no filterable columns detected for', kindLower)
+      return null
     }
 
-    if (kindLower === 'nodes') {
-      const conditionCounts: Record<string, number> = {}
-      NODE_CONDITIONS.forEach(c => conditionCounts[c] = 0)
-
-      for (const node of resources) {
-        const nodeStatus = getNodeStatus(node)
-        const { problems } = getNodeConditions(node)
-        if (nodeStatus.text.includes('NotReady')) conditionCounts['NotReady']++
-        problems.forEach(p => {
-          const key = p.replace(' ', '')
-          if (conditionCounts[key] !== undefined) conditionCounts[key]++
-        })
-      }
-
-      return {
-        type: 'nodes' as const,
-        conditions: NODE_CONDITIONS.map(c => ({ value: c, count: conditionCounts[c] })).filter(c => c.count > 0),
-      }
-    }
-
-    return null
-  }, [resources, selectedKind.name, getWorkloadHealthLevel])
+    console.debug('[filters] filterOptions:', { kind: kindLower, columns: filterableColumns.map(c => `${c.label}(${c.values.length} vals)`), hasProblems: !!problems })
+    return { columns: filterableColumns, problems }
+  }, [resources, selectedKind.name])
 
   // Compute inactive ReplicaSet count for toggle display
   const inactiveReplicaSetCount = useMemo(() => {
@@ -1523,18 +1603,20 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
   }, [resources, selectedKind.name])
 
   // Check if any filters are active
-  const hasActiveFilters = statusFilter !== '' || problemFilters.length > 0 || labelSelector !== '' || (ownerKind !== '' && ownerName !== '')
+  const hasActiveColumnFilters = Object.values(columnFilters).some(v => v)
+  const hasActiveFilters = hasActiveColumnFilters || problemFilters.length > 0 || labelSelector !== '' || (ownerKind !== '' && ownerName !== '')
   const hasOwnerFilter = ownerKind !== '' && ownerName !== ''
 
   // Clear all filters
   const clearFilters = useCallback(() => {
-    setStatusFilter('')
+    setColumnFilters({})
     setProblemFilters([])
     setLabelSelector('')
     setOwnerKind('')
     setOwnerName('')
     // Also clear URL params
     const params = new URLSearchParams(window.location.search)
+    params.delete('filters')
     params.delete('labels')
     params.delete('ownerKind')
     params.delete('ownerName')
@@ -1708,7 +1790,7 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
 
           {/* Filter dropdown */}
           {filterOptions && (
-            <div className="relative">
+            <div className="relative" ref={filterDropdownRef}>
               <button
                 onClick={() => setShowFilterDropdown(!showFilterDropdown)}
                 className={clsx(
@@ -1722,7 +1804,7 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
                 <span>Filter</span>
                 {hasActiveFilters && (
                   <span className="px-1.5 py-0.5 text-xs bg-blue-500/30 text-blue-700 dark:text-blue-300 rounded">
-                    {(statusFilter ? 1 : 0) + problemFilters.length}
+                    {Object.values(columnFilters).filter(v => v).length + problemFilters.length}
                   </span>
                 )}
               </button>
@@ -1742,20 +1824,28 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
                   </div>
 
                   <div className="p-3 space-y-4 max-h-80 overflow-y-auto">
-                    {/* Status/Phase filter */}
-                    {filterOptions.type === 'pods' && filterOptions.phases.length > 0 && (
-                      <div>
+                    {/* Generic column filters */}
+                    {filterOptions.columns.map(({ key, label, values }) => (
+                      <div key={key}>
                         <label className="text-xs font-medium text-theme-text-secondary uppercase tracking-wide mb-2 block">
-                          Phase
+                          {label}
                         </label>
                         <div className="flex flex-wrap gap-1.5">
-                          {filterOptions.phases.map(({ value, count }) => (
+                          {values.map(({ value, count }) => (
                             <button
                               key={value}
-                              onClick={() => setStatusFilter(statusFilter === value ? '' : value)}
+                              onClick={() => setColumnFilters(prev => {
+                                const next = { ...prev }
+                                if (next[key] === value) {
+                                  delete next[key]
+                                } else {
+                                  next[key] = value
+                                }
+                                return next
+                              })}
                               className={clsx(
                                 'px-2 py-1 text-xs rounded transition-colors',
-                                statusFilter === value
+                                columnFilters[key] === value
                                   ? 'bg-blue-500/30 text-blue-700 dark:text-blue-300'
                                   : 'bg-theme-elevated text-theme-text-secondary hover:text-theme-text-primary'
                               )}
@@ -1765,10 +1855,10 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
                           ))}
                         </div>
                       </div>
-                    )}
+                    ))}
 
-                    {/* Problem filter (pods only) */}
-                    {filterOptions.type === 'pods' && filterOptions.problems.length > 0 && (
+                    {/* Problem filter (pods only, multi-select) */}
+                    {filterOptions.problems && filterOptions.problems.length > 0 && (
                       <div>
                         <label className="text-xs font-medium text-theme-text-secondary uppercase tracking-wide mb-2 block">
                           Problems
@@ -1786,59 +1876,6 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
                               )}
                             >
                               {value} ({count})
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Workload health filter */}
-                    {filterOptions.type === 'workload' && filterOptions.health.length > 0 && (
-                      <div>
-                        <label className="text-xs font-medium text-theme-text-secondary uppercase tracking-wide mb-2 block">
-                          Health
-                        </label>
-                        <div className="flex flex-wrap gap-1.5">
-                          {filterOptions.health.map(({ value, count }) => (
-                            <button
-                              key={value}
-                              onClick={() => setStatusFilter(statusFilter === value ? '' : value)}
-                              className={clsx(
-                                'px-2 py-1 text-xs rounded transition-colors',
-                                statusFilter === value
-                                  ? value === 'Healthy' ? 'bg-green-500/30 text-green-700 dark:text-green-300'
-                                    : value === 'Degraded' ? 'bg-yellow-500/30 text-yellow-700 dark:text-yellow-300'
-                                    : value === 'Unhealthy' ? 'bg-red-500/30 text-red-700 dark:text-red-300'
-                                    : 'bg-blue-500/30 text-blue-700 dark:text-blue-300'
-                                  : 'bg-theme-elevated text-theme-text-secondary hover:text-theme-text-primary'
-                              )}
-                            >
-                              {value} ({count})
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Node conditions filter */}
-                    {filterOptions.type === 'nodes' && filterOptions.conditions.length > 0 && (
-                      <div>
-                        <label className="text-xs font-medium text-theme-text-secondary uppercase tracking-wide mb-2 block">
-                          Conditions
-                        </label>
-                        <div className="flex flex-wrap gap-1.5">
-                          {filterOptions.conditions.map(({ value, count }) => (
-                            <button
-                              key={value}
-                              onClick={() => setStatusFilter(statusFilter === value ? '' : value)}
-                              className={clsx(
-                                'px-2 py-1 text-xs rounded transition-colors',
-                                statusFilter === value
-                                  ? 'bg-red-500/30 text-red-700 dark:text-red-300'
-                                  : 'bg-theme-elevated text-theme-text-secondary hover:text-theme-text-primary'
-                              )}
-                            >
-                              {value.replace(/([A-Z])/g, ' $1').trim()} ({count})
                             </button>
                           ))}
                         </div>
@@ -1866,14 +1903,18 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
           {/* Active filter badges */}
           {hasActiveFilters && (
             <div className="flex items-center gap-2">
-              {statusFilter && (
-                <span className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-500/20 text-blue-700 dark:text-blue-300 rounded">
-                  {statusFilter}
-                  <button onClick={() => setStatusFilter('')} className="hover:text-theme-text-primary">
+              {Object.entries(columnFilters).filter(([, v]) => v).map(([key, value]) => (
+                <span key={key} className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-500/20 text-blue-700 dark:text-blue-300 rounded">
+                  {value}
+                  <button onClick={() => setColumnFilters(prev => {
+                    const next = { ...prev }
+                    delete next[key]
+                    return next
+                  })} className="hover:text-theme-text-primary">
                     <X className="w-3 h-3" />
                   </button>
                 </span>
-              )}
+              ))}
               {problemFilters.map(p => (
                 <span key={p} className="flex items-center gap-1 px-2 py-1 text-xs bg-red-500/20 text-red-700 dark:text-red-300 rounded">
                   {p}
@@ -2169,6 +2210,12 @@ function CellContent({ resource, kind, column }: CellContentProps) {
       return <CertificateRequestCell resource={resource} column={column} />
     case 'clusterissuers':
       return <ClusterIssuerCell resource={resource} column={column} />
+    case 'issuers':
+      return <IssuerCell resource={resource} column={column} />
+    case 'orders':
+      return <OrderCell resource={resource} column={column} />
+    case 'challenges':
+      return <ChallengeCell resource={resource} column={column} />
     case 'gateways':
       return <GatewayCell resource={resource} column={column} />
     case 'httproutes':
@@ -3037,6 +3084,69 @@ function ClusterIssuerCell({ resource, column }: { resource: any; column: string
     }
     case 'issuerType':
       return <span className="text-sm text-theme-text-secondary">{getClusterIssuerType(resource)}</span>
+    default:
+      return <span className="text-sm text-theme-text-tertiary">-</span>
+  }
+}
+
+function IssuerCell({ resource, column }: { resource: any; column: string }) {
+  switch (column) {
+    case 'status': {
+      const status = getIssuerStatus(resource)
+      return (
+        <span className={clsx('inline-flex items-center px-2 py-0.5 rounded text-xs font-medium', status.color)}>
+          {status.text}
+        </span>
+      )
+    }
+    case 'issuerType':
+      return <span className="text-sm text-theme-text-secondary">{getIssuerType(resource)}</span>
+    default:
+      return <span className="text-sm text-theme-text-tertiary">-</span>
+  }
+}
+
+function OrderCell({ resource, column }: { resource: any; column: string }) {
+  switch (column) {
+    case 'state': {
+      const state = getOrderState(resource)
+      return (
+        <span className={clsx('inline-flex items-center px-2 py-0.5 rounded text-xs font-medium', state.color)}>
+          {state.text}
+        </span>
+      )
+    }
+    case 'domains': {
+      const domains = getOrderDomains(resource)
+      return (
+        <Tooltip content={domains}>
+          <span className="text-sm text-theme-text-secondary truncate block">{domains}</span>
+        </Tooltip>
+      )
+    }
+    case 'issuer':
+      return <span className="text-sm text-theme-text-secondary">{getOrderIssuer(resource)}</span>
+    default:
+      return <span className="text-sm text-theme-text-tertiary">-</span>
+  }
+}
+
+function ChallengeCell({ resource, column }: { resource: any; column: string }) {
+  switch (column) {
+    case 'state': {
+      const state = getChallengeState(resource)
+      return (
+        <span className={clsx('inline-flex items-center px-2 py-0.5 rounded text-xs font-medium', state.color)}>
+          {state.text}
+        </span>
+      )
+    }
+    case 'challengeType':
+      return <span className="text-sm text-theme-text-secondary">{getChallengeType(resource)}</span>
+    case 'domain':
+      return <span className="text-sm text-theme-text-secondary">{getChallengeDomain(resource)}</span>
+    case 'presented':
+      return <span className="text-sm text-theme-text-secondary">{getChallengePresented(resource)}</span>
     default:
       return <span className="text-sm text-theme-text-tertiary">-</span>
   }

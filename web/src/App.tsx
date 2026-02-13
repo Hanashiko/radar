@@ -8,6 +8,7 @@ import { TopologyGraph } from './components/topology/TopologyGraph'
 import { TopologyFilterSidebar } from './components/topology/TopologyFilterSidebar'
 import { TimelineView } from './components/timeline/TimelineView'
 import { ResourcesView } from './components/resources/ResourcesView'
+import { serializeColumnFilters } from './components/resources/resource-utils'
 import { ResourceDetailDrawer } from './components/resources/ResourceDetailDrawer'
 import { ResourceDetailPage } from './components/resource/ResourceDetailPage'
 import { HelmView } from './components/helm/HelmView'
@@ -138,20 +139,11 @@ function AppInner() {
   const setMainView = useCallback((view: ExtendedMainView, params?: Record<string, string>) => {
     const path = view === 'home' ? '/' : `/${view}`
 
-    // Clean up view-specific params
-    const newParams = new URLSearchParams(searchParams)
-
-    // Remove topology-only params when leaving topology
-    if (view !== 'topology') {
-      newParams.delete('mode')
-      newParams.delete('group')
-    }
-
-    // Remove timeline-only params when leaving timeline
-    if (view !== 'timeline') {
-      newParams.delete('resource')
-      newParams.delete('view')
-      newParams.delete('filter')
+    // Start fresh — keep only cross-view params (namespaces), discard all view-specific ones
+    const newParams = new URLSearchParams()
+    const globalNamespaces = searchParams.get('namespaces')
+    if (globalNamespaces) {
+      newParams.set('namespaces', globalNamespaces)
     }
 
     // Add any new params
@@ -578,8 +570,9 @@ function AppInner() {
             namespaces={namespaces}
             topology={topology}
             onNavigateToView={setMainView}
-            onNavigateToResourceKind={(kind, apiGroup) => {
+            onNavigateToResourceKind={(kind, apiGroup, filters) => {
               // Navigate to resources view with kind pre-selected via URL param
+              console.debug('[filters] App.onNavigateToResourceKind:', { kind, apiGroup, filters })
               const newParams = new URLSearchParams(searchParams)
               newParams.set('kind', kind)
               newParams.delete('mode')
@@ -590,6 +583,17 @@ function AppInner() {
               } else {
                 newParams.delete('apiGroup')
               }
+              // Apply column filters if provided
+              if (filters && Object.keys(filters).length > 0) {
+                const filtersStr = serializeColumnFilters(filters)
+                if (filtersStr) {
+                  newParams.set('filters', filtersStr)
+                }
+              } else {
+                newParams.delete('filters')
+              }
+              const targetURL = `/resources?${newParams.toString()}`
+              console.debug('[filters] App.onNavigateToResourceKind: navigating to', targetURL)
               navigate({ pathname: '/resources', search: newParams.toString() })
             }}
             onNavigateToResource={(resource) => {
