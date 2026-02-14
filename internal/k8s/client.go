@@ -17,18 +17,18 @@ import (
 )
 
 var (
-	k8sClient       *kubernetes.Clientset
-	k8sConfig       *rest.Config
-	discoveryClient *discovery.DiscoveryClient
-	dynamicClient   dynamic.Interface
-	initOnce        sync.Once
-	initErr         error
-	kubeconfigPath     string
-	kubeconfigPaths    []string // Multiple kubeconfig paths when using --kubeconfig-dir
-	contextName        string
-	clusterName        string
-	contextNamespace   string // Default namespace from kubeconfig context
-	fallbackNamespace  string // Explicit namespace from --namespace flag
+	k8sClient         *kubernetes.Clientset
+	k8sConfig         *rest.Config
+	discoveryClient   *discovery.DiscoveryClient
+	dynamicClient     dynamic.Interface
+	initOnce          sync.Once
+	initErr           error
+	kubeconfigPath    string
+	kubeconfigPaths   []string // Multiple kubeconfig paths when using --kubeconfig-dir
+	contextName       string
+	clusterName       string
+	contextNamespace  string // Default namespace from kubeconfig context
+	fallbackNamespace string // Explicit namespace from --namespace flag
 	// clientMu protects access to client variables during context switches.
 	// Readers use RLock, context switch uses Lock.
 	clientMu sync.RWMutex
@@ -105,8 +105,18 @@ func doInit(opts InitOptions) error {
 					kubeconfig = filepath.Join(home, ".kube", "config")
 				}
 			}
-			kubeconfigPath = kubeconfig
-			loadingRules = &clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig}
+
+			// KUBECONFIG can contain multiple paths separated by the OS path
+			// list separator (colon on Unix, semicolon on Windows).
+			// Split and use Precedence when there are multiple entries.
+			if paths := filepath.SplitList(kubeconfig); len(paths) > 1 {
+				kubeconfigPaths = paths
+				loadingRules = &clientcmd.ClientConfigLoadingRules{Precedence: paths}
+				log.Printf("KUBECONFIG contains %d paths, using merged mode", len(paths))
+			} else {
+				kubeconfigPath = kubeconfig
+				loadingRules = &clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig}
+			}
 		}
 
 		configOverrides := &clientcmd.ConfigOverrides{}
