@@ -225,7 +225,8 @@ func (s *Server) setupRoutes() {
 			r.Post("/github/star", s.handleGitHubStar)
 			r.Post("/github/dismiss", s.handleGitHubDismiss)
 
-			// Desktop update routes (only active when updater is set)
+			// Desktop routes
+			r.Post("/desktop/open-url", s.handleDesktopOpenURL)
 			r.Post("/desktop/update", s.handleDesktopUpdateStart)
 			r.Get("/desktop/update/status", s.handleDesktopUpdateStatus)
 			r.Post("/desktop/update/apply", s.handleDesktopUpdateApply)

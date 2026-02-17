@@ -2,18 +2,25 @@ import type { SelectedResource, ResourceRef } from '../types'
 
 /**
  * Open a URL in the system browser.
- * In the Wails desktop app, window.open() is swallowed by the webview,
- * so we use the injected runtime.BrowserOpenURL instead.
+ * In the Wails desktop app, window.open() is swallowed by the webview
+ * (the Wails JS runtime is lost after the redirect to localhost), so we
+ * call a backend endpoint that opens the URL via the OS. Falls back to
+ * window.open() in browser mode (the endpoint returns 404).
  */
 export function openExternal(url: string): void {
-  const wailsRuntime = (window as unknown as Record<string, unknown>).runtime as
-    | { BrowserOpenURL?: (url: string) => void }
-    | undefined
-  if (wailsRuntime?.BrowserOpenURL) {
-    wailsRuntime.BrowserOpenURL(url)
-  } else {
-    window.open(url, '_blank')
-  }
+  fetch('/api/desktop/open-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  })
+    .then((res) => {
+      if (!res.ok) {
+        window.open(url, '_blank')
+      }
+    })
+    .catch(() => {
+      window.open(url, '_blank')
+    })
 }
 
 /**
