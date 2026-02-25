@@ -699,6 +699,7 @@ export interface TrafficRecommendation {
 // Response from GET /api/traffic/sources
 export interface TrafficSourcesResponse {
   cluster: TrafficClusterInfo
+  active: string
   detected: TrafficSourceStatus[]
   notDetected: string[]
   recommended?: TrafficRecommendation
@@ -727,8 +728,8 @@ export interface TrafficFilters {
   timeRange: string
 }
 
-// Main view type now includes 'traffic'
-export type ExtendedMainView = MainView | 'traffic'
+// Main view type now includes 'traffic' and 'cost'
+export type ExtendedMainView = MainView | 'traffic' | 'cost'
 
 // ============================================================================
 // Image Filesystem Types

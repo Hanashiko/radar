@@ -16,6 +16,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/skyhook-io/radar/internal/portforward"
+	promclient "github.com/skyhook-io/radar/internal/prometheus"
 )
 
 const (
@@ -37,11 +40,13 @@ var metricsServiceLocations = []struct {
 	{"victoria-metrics", "victoria-metrics-single-server", 8428, ""},
 	{"victoria-metrics", "vmsingle", 8428, ""},
 	{"monitoring", "victoria-metrics-single-server", 8428, ""},
+	{"monitoring", "victoria-metrics-victoria-metrics-single-server", 8428, ""},
 	{"monitoring", "vmsingle", 8428, ""},
 	// VictoriaMetrics vmselect (cluster mode) - uses sub-path
 	{"victoria-metrics", "vmselect", 8481, "/select/0/prometheus"},
 	{"monitoring", "vmselect", 8481, "/select/0/prometheus"},
 	// kube-prometheus-stack (any release name uses this service name pattern)
+	{"monitoring", "kube-prometheus-stack-prometheus", 9090, ""},
 	{"monitoring", "prometheus-kube-prometheus-prometheus", 9090, ""},
 	{"monitoring", "prometheus-operated", 9090, ""},
 	// Standard Prometheus locations
@@ -256,7 +261,7 @@ func (c *CarettaSource) discoverPrometheus(ctx context.Context) string {
 	}
 
 	// Check for active managed port-forward first
-	if pfAddr := GetMetricsAddress(c.currentContext); pfAddr != "" {
+	if pfAddr := portforward.GetAddress(c.currentContext); pfAddr != "" {
 		if c.tryMetricsEndpointLocked(ctx, pfAddr) {
 			log.Printf("[caretta] Using managed port-forward at %s", pfAddr)
 			c.prometheusAddr = pfAddr
@@ -317,8 +322,9 @@ func (c *CarettaSource) queryPrometheusForFlows(ctx context.Context, promAddr st
 	query := "caretta_links_observed"
 	if opts.Namespace != "" {
 		// Filter by namespace (either client or server)
+		safeNS := promclient.SanitizeLabelValue(opts.Namespace)
 		query = fmt.Sprintf(`caretta_links_observed{client_namespace="%s"} or caretta_links_observed{server_namespace="%s"}`,
-			opts.Namespace, opts.Namespace)
+			safeNS, safeNS)
 	}
 
 	queryURL := fmt.Sprintf("%s%s/api/v1/query?query=%s", promAddr, basePath, url.QueryEscape(query))
@@ -473,7 +479,7 @@ func (c *CarettaSource) Close() error {
 
 // Connect establishes connection to metrics service, starting port-forward if needed
 // contextName is the current K8s context name, used to validate port-forward belongs to right cluster
-func (c *CarettaSource) Connect(ctx context.Context, contextName string) (*MetricsConnectionInfo, error) {
+func (c *CarettaSource) Connect(ctx context.Context, contextName string) (*portforward.ConnectionInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -481,7 +487,7 @@ func (c *CarettaSource) Connect(ctx context.Context, contextName string) (*Metri
 	if c.prometheusAddr != "" && c.currentContext == contextName {
 		testAddr := c.prometheusAddr + c.metricsBasePath
 		if c.tryMetricsEndpointLocked(ctx, testAddr) {
-			return &MetricsConnectionInfo{
+			return &portforward.ConnectionInfo{
 				Connected:   true,
 				Address:     c.prometheusAddr,
 				Namespace:   c.metricsNamespace,
@@ -508,13 +514,13 @@ func (c *CarettaSource) Connect(ctx context.Context, contextName string) (*Metri
 			log.Printf("[caretta] Connected using manual metrics URL: %s", addr)
 			c.prometheusAddr = addr
 			c.metricsBasePath = ""
-			return &MetricsConnectionInfo{
+			return &portforward.ConnectionInfo{
 				Connected:   true,
 				Address:     addr,
 				ContextName: contextName,
 			}, nil
 		}
-		return &MetricsConnectionInfo{
+		return &portforward.ConnectionInfo{
 			Connected: false,
 			Error:     fmt.Sprintf("Manual metrics URL %s is not reachable. Check the URL and ensure the service is running.", addr),
 		}, nil
@@ -523,7 +529,7 @@ func (c *CarettaSource) Connect(ctx context.Context, contextName string) (*Metri
 	// Layer 2+3: Well-known locations, then dynamic discovery
 	metricsInfo := c.discoverServiceLocked(ctx)
 	if metricsInfo == nil {
-		return &MetricsConnectionInfo{
+		return &portforward.ConnectionInfo{
 			Connected: false,
 			Error:     "No Prometheus/VictoriaMetrics service found. Use --prometheus-url to specify manually.",
 		}, nil
@@ -532,7 +538,7 @@ func (c *CarettaSource) Connect(ctx context.Context, contextName string) (*Metri
 	// Try cluster-internal address first (works when running in-cluster)
 	if c.tryClusterAddrLocked(ctx, metricsInfo) {
 		log.Printf("[caretta] Connected to metrics service at %s (basePath=%q)", metricsInfo.clusterAddr, metricsInfo.basePath)
-		return &MetricsConnectionInfo{
+		return &portforward.ConnectionInfo{
 			Connected:   true,
 			Address:     metricsInfo.clusterAddr,
 			Namespace:   metricsInfo.namespace,
@@ -542,13 +548,13 @@ func (c *CarettaSource) Connect(ctx context.Context, contextName string) (*Metri
 	}
 
 	// Check if there's already a valid managed port-forward for this context
-	if pfAddr := GetMetricsAddress(contextName); pfAddr != "" {
+	if pfAddr := portforward.GetAddress(contextName); pfAddr != "" {
 		pfTestAddr := pfAddr + metricsInfo.basePath
 		if c.tryMetricsEndpointLocked(ctx, pfTestAddr) {
 			log.Printf("[caretta] Using existing port-forward at %s", pfAddr)
 			c.prometheusAddr = pfAddr
 			c.metricsBasePath = metricsInfo.basePath
-			return &MetricsConnectionInfo{
+			return &portforward.ConnectionInfo{
 				Connected:   true,
 				Address:     pfAddr,
 				Namespace:   metricsInfo.namespace,
@@ -560,9 +566,9 @@ func (c *CarettaSource) Connect(ctx context.Context, contextName string) (*Metri
 
 	// Start a new managed port-forward
 	log.Printf("[caretta] Starting port-forward to %s/%s:%d", metricsInfo.namespace, metricsInfo.name, metricsInfo.port)
-	connInfo, err := StartMetricsPortForward(ctx, metricsInfo.namespace, metricsInfo.name, metricsInfo.port, contextName)
+	connInfo, err := portforward.Start(ctx, metricsInfo.namespace, metricsInfo.name, metricsInfo.port, contextName)
 	if err != nil {
-		return &MetricsConnectionInfo{
+		return &portforward.ConnectionInfo{
 			Connected:   false,
 			Namespace:   metricsInfo.namespace,
 			ServiceName: metricsInfo.name,
@@ -846,4 +852,51 @@ func (c *CarettaSource) GetMetricsServiceInfo() (namespace, service string, port
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.metricsNamespace, c.metricsService, c.metricsPort
+}
+
+// queryPrometheusRaw executes a PromQL query and returns the parsed response.
+// Used by IstioSource to share Prometheus discovery infrastructure.
+func (c *CarettaSource) queryPrometheusRaw(ctx context.Context, query string) (*prometheusResponse, error) {
+	c.mu.RLock()
+	promAddr := c.prometheusAddr
+	basePath := c.metricsBasePath
+	c.mu.RUnlock()
+
+	if promAddr == "" {
+		promAddr = c.discoverPrometheus(ctx)
+		if promAddr == "" {
+			return nil, fmt.Errorf("prometheus not found")
+		}
+		c.mu.RLock()
+		basePath = c.metricsBasePath
+		c.mu.RUnlock()
+	}
+
+	queryURL := fmt.Sprintf("%s%s/api/v1/query?query=%s", promAddr, basePath, url.QueryEscape(query))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", queryURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("querying prometheus: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("prometheus returned status %d", resp.StatusCode)
+	}
+
+	var promResp prometheusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&promResp); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	if promResp.Status != "success" {
+		return nil, fmt.Errorf("prometheus query failed: %s", promResp.Status)
+	}
+
+	return &promResp, nil
 }

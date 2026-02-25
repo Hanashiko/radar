@@ -253,6 +253,132 @@ export function useDashboardHelm(namespaces: string[] = []) {
   })
 }
 
+// ============================================================================
+// OpenCost
+// ============================================================================
+
+export interface OpenCostNamespaceCost {
+  name: string
+  hourlyCost: number
+  cpuCost: number
+  memoryCost: number
+  storageCost?: number
+  cpuUsageCost?: number
+  memoryUsageCost?: number
+  efficiency?: number
+  idleCost?: number
+}
+
+export type CostUnavailableReason = 'no_prometheus' | 'no_metrics' | 'query_error'
+
+export interface OpenCostSummary {
+  available: boolean
+  reason?: CostUnavailableReason
+  currency?: string
+  window?: string
+  totalHourlyCost?: number
+  totalStorageCost?: number
+  totalIdleCost?: number
+  clusterEfficiency?: number
+  namespaces?: OpenCostNamespaceCost[]
+}
+
+export function useOpenCostSummary() {
+  return useQuery<OpenCostSummary>({
+    queryKey: ['opencost-summary'],
+    queryFn: () => fetchJSON('/opencost/summary'),
+    refetchInterval: 60000, // Refresh every minute
+    staleTime: 30000,
+    placeholderData: (prev) => prev, // Keep previous data visible during refetch
+  })
+}
+
+// Workload-level cost breakdown for a namespace
+export interface OpenCostWorkloadCost {
+  name: string
+  kind: string
+  hourlyCost: number
+  cpuCost: number
+  memoryCost: number
+  replicas: number
+  cpuUsageCost?: number
+  memoryUsageCost?: number
+  efficiency?: number
+  idleCost?: number
+}
+
+export interface OpenCostWorkloadResponse {
+  available: boolean
+  reason?: CostUnavailableReason
+  namespace: string
+  workloads: OpenCostWorkloadCost[]
+}
+
+export function useOpenCostWorkloads(namespace: string, options?: { enabled?: boolean }) {
+  return useQuery<OpenCostWorkloadResponse>({
+    queryKey: ['opencost-workloads', namespace],
+    queryFn: () => fetchJSON(`/opencost/workloads?namespace=${encodeURIComponent(namespace)}`),
+    enabled: (options?.enabled ?? true) && Boolean(namespace),
+    staleTime: 30000,
+  })
+}
+
+// Cost trend over time
+export type CostTimeRange = '6h' | '24h' | '7d'
+
+export interface OpenCostTrendDataPoint {
+  timestamp: number
+  value: number
+}
+
+export interface OpenCostTrendSeries {
+  namespace: string
+  dataPoints: OpenCostTrendDataPoint[]
+}
+
+export interface OpenCostTrendResponse {
+  available: boolean
+  reason?: CostUnavailableReason
+  range: string
+  series?: OpenCostTrendSeries[]
+}
+
+export function useOpenCostTrend(range_: CostTimeRange = '24h') {
+  return useQuery<OpenCostTrendResponse>({
+    queryKey: ['opencost-trend', range_],
+    queryFn: () => fetchJSON(`/opencost/trend?range=${range_}`),
+    staleTime: 60000,
+    refetchInterval: 120000, // Refresh every 2 minutes
+    placeholderData: (prev) => prev,
+  })
+}
+
+// Node cost breakdown
+export interface OpenCostNodeCost {
+  name: string
+  instanceType?: string
+  region?: string
+  hourlyCost: number
+  cpuCost: number
+  memoryCost: number
+}
+
+export interface OpenCostNodeResponse {
+  available: boolean
+  reason?: CostUnavailableReason
+  nodes?: OpenCostNodeCost[]
+}
+
+export function useOpenCostNodes() {
+  return useQuery<OpenCostNodeResponse>({
+    queryKey: ['opencost-nodes'],
+    queryFn: () => fetchJSON('/opencost/nodes'),
+    staleTime: 60000,
+    refetchInterval: 120000,
+    placeholderData: (prev) => prev,
+  })
+}
+
 // Cluster info
 export function useClusterInfo() {
   const query = useQuery<ClusterInfo>({
