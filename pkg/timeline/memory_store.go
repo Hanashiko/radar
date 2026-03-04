@@ -151,7 +151,7 @@ func (m *MemoryStore) QueryGrouped(ctx context.Context, opts QueryOptions) (*Tim
 	}
 
 	// Group events using shared function
-	groups := groupEvents(events, opts.GroupBy)
+	groups := GroupEvents(events, opts.GroupBy)
 
 	// Apply limit to groups
 	limit := opts.Limit
@@ -367,5 +367,4 @@ func (m *MemoryStore) getOrCompileFilter(presetName string) (*CompiledFilter, er
 	return cf, nil
 }
 
-// Note: groupEvents, groupByOwner, groupByApp, groupByNamespace, and worseHealth
-// are defined in sqlite_store.go and shared by all store implementations
+// Note: groupEvents and helpers are defined in grouping.go

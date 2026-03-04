@@ -56,9 +56,8 @@ type QueryOptions struct {
 	FilterPreset string
 
 	// Pagination
-	Limit  int    // Max results (default 200, max 1000)
-	Offset int    // Skip first N results
-	Cursor string // Cursor for keyset pagination (more efficient than offset)
+	Limit  int // Max results (default 200, max 1000)
+	Offset int // Skip first N results
 
 	// Grouping
 	GroupBy GroupingMode // How to group results
@@ -134,6 +133,11 @@ func CompileFilter(preset *FilterPreset) (*CompiledFilter, error) {
 	}
 
 	return cf, nil
+}
+
+// IncludesManaged reports whether the compiled preset allows managed resources.
+func (cf *CompiledFilter) IncludesManaged() bool {
+	return cf != nil && cf.preset != nil && cf.preset.IncludeManaged
 }
 
 // Matches returns true if the event passes the filter

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/skyhook-io/radar/internal/k8s"
-	"github.com/skyhook-io/radar/internal/topology"
+	topology "github.com/skyhook-io/radar/pkg/topology"
 )
 
 // MaxSSEClients limits the number of concurrent SSE connections to prevent resource exhaustion
@@ -230,9 +230,10 @@ func (b *SSEBroadcaster) registerContextSwitchCallback() {
 
 // initCachedTopology builds the initial topology cache
 func (b *SSEBroadcaster) initCachedTopology() {
-	builder := topology.NewBuilder()
+	builder := topology.NewBuilder(k8s.NewTopologyResourceProvider(k8s.GetResourceCache())).WithDynamic(k8s.NewTopologyDynamicProvider(k8s.GetDynamicResourceCache(), k8s.GetResourceDiscovery()))
 	opts := topology.DefaultBuildOptions()
 	opts.ViewMode = topology.ViewModeResources
+	opts.MaxNodes = 0 // No limit — this topology is only used for relationship lookups, not sent to the browser
 	// Include ReplicaSets in the cache so relationship lookups work for them
 	opts.IncludeReplicaSets = true
 
@@ -432,12 +433,13 @@ func (b *SSEBroadcaster) broadcastTopologyUpdate() {
 
 	log.Printf("Broadcasting topology update to %d clients", len(clients))
 
-	builder := topology.NewBuilder()
+	builder := topology.NewBuilder(k8s.NewTopologyResourceProvider(k8s.GetResourceCache())).WithDynamic(k8s.NewTopologyDynamicProvider(k8s.GetDynamicResourceCache(), k8s.GetResourceDiscovery()))
 
 	// Always build and cache a full topology (all namespaces, resources view)
 	// for relationship lookups, even if no clients are connected
 	fullOpts := topology.DefaultBuildOptions()
 	fullOpts.ViewMode = topology.ViewModeResources
+	fullOpts.MaxNodes = 0 // No limit — this topology is only used for relationship lookups, not sent to the browser
 	fullOpts.IncludeReplicaSets = true // Include for relationship lookups
 	if fullTopo, err := builder.Build(fullOpts); err == nil {
 		b.updateCachedTopology(fullTopo)
@@ -624,7 +626,7 @@ func (b *SSEBroadcaster) HandleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial topology immediately (only if connected)
 	if status.State == k8s.StateConnected {
-		builder := topology.NewBuilder()
+		builder := topology.NewBuilder(k8s.NewTopologyResourceProvider(k8s.GetResourceCache())).WithDynamic(k8s.NewTopologyDynamicProvider(k8s.GetDynamicResourceCache(), k8s.GetResourceDiscovery()))
 		opts := topology.DefaultBuildOptions()
 		opts.Namespaces = namespaces
 		if viewMode == "traffic" {
